@@ -1,13 +1,11 @@
 #!/usr/bin/env node
 
 var program = require('commander')
+    , consts = require('./libs/consts')
+    , getAWS = require('./libs/getAWS')
     , async = require('async')
-    , AWS = require('aws-sdk')
-    , debug = require('debug')
-    , d = {
-        /* debug outputs */
-        status: debug('status')
-    };
+    , d = require('./libs/debug')
+    ;
 
 /*
  * This will set up: 
@@ -23,19 +21,13 @@ var program = require('commander')
 program
     .version('0.0.1')
     .option('-r, --region <region>', 'AWS region', String, 'us-east-1')
-    .option('-d, --domain <domain>', 'SWF Domain', String, 'test-swf-adder')
+    .option('-d, --domain <domain>', 'SWF Domain', String, 'test-swf')
     .parse(process.argv);
 
-AWS.config.update({
-    accessKeyId : process.env.AWS_ACCESS_KEY,
-    secretAccessKey : process.env.AWS_SECRET_KEY
-});
-
-AWS.config.update({region: program.region});
-
+var AWS = getAWS(program.region);
 var swf = new AWS.SimpleWorkflow({apiVersion: '2012-01-25'});
 
-async.waterfall([
+var createTasks = [
     function(cb) {
         /* make sure the domain exists */
         swf.describeDomain({name: program.domain}, function(err, data) {
@@ -57,22 +49,28 @@ async.waterfall([
     , function(domain, cb) {
         swf.describeWorkflowType({
             domain: program.domain
-            , workflowType: {name: "add-one", version: "0.1"}
+            , workflowType: {
+                name: consts.workflow.name, 
+                version: consts.workflow.ver}
         }, function(err, data) {
             if (err && err.code === "UnknownResourceFault") {
-                d.status("Creating WorkflowType: add-number");
+                d.status("Creating WorkflowType: %s", consts.workflow.name);
                 swf.registerWorkflowType({
                     domain: program.domain
-                    , name: "add-one"
-                    , version: "0.1"
-                    , description: "Workflow for adding a 1 to a random value"
-                    , defaultTaskList: { name: "default" }
-                    , defaultTaskStartToCloseTimeout: "60"
-                    , defaultExecutionStartToCloseTimeout: "180"
+                    , name: consts.workflow.name
+                    , version: consts.workflow.ver
+                    , description: "A simple workflow"
+                    , defaultTaskList: { name: consts.workflow.defaultTaskList }
+
+                    /* maximum timeout of decision tasks */
+                    , defaultTaskStartToCloseTimeout: consts.workflow.defaultTaskStartToCloseTimeout
+
+                    /* max time this workflow can run for */
+                    , defaultExecutionStartToCloseTimeout: consts.workflow.defaultExecutionStartToCloseTimeout
                 }, function(err, data) {
                     if (err) return cb(err);
 
-                    d.status("Created WorkflowType: add-one");
+                    d.status("Created WorkflowType: %s", consts.workflow.name);
                     cb(null, domain);
                 });
             } else if (err) {
@@ -83,37 +81,62 @@ async.waterfall([
             }
         });
     }
-    , function(domain, cb) {
-        swf.describeActivityType({
-            domain: program.domain
-            , activityType: {
-                name: "add-numbers"
-                , version: "0.1"
-            }
-        }, function(err, data) {
-                if (err && err.code === "UnknownResourceFault") {
-                    d.status("Creating activity type: add-numbers");
-                    swf.registerActivityType({
-                        domain: program.domain
-                        , name: "add-numbers"
-                        , version: "0.1"
-                        , description: "add two numbers together"
-                        , defaultTaskStartToCloseTimeout: "30"
-                    }, function(err, data){
-                        if (err) return cb(err); 
+];
 
-                        d.status("Created new activity type");
-                        cb(null, domain);
-                    });
-                } else if (err) {
-                    cb(err);
-                } else {
-                    d.status("Found activityType: add-numbers");
-                    cb(null, domain);
-                }
-        });
-    }
-], function(err, results) {
+consts.activities.forEach(function(activity) {
+    createTasks.push(createAddActivity(
+        activity.name
+        , activity.ver
+        , activity.description
+        )
+    );
+});
+
+async.waterfall(createTasks, function(err, results) {
     console.log(err, results);
 });
 
+
+/*
+ * create an activity if it doesn't exist
+ */
+function createAddActivity(name, ver, description, timeout) {
+
+    timeout = timeout || "60";
+    description = description || "";
+    return function(domain, cb) {
+        swf.describeActivityType({
+            domain: program.domain
+            , activityType: { name: name , version: ver}
+        }, function(err, data) {
+            if (err && err.code === "UnknownResourceFault") {
+                d.status("Creating activity type: %s", name);
+                swf.registerActivityType({
+                    domain: program.domain
+                    , name: name
+                    , version: ver
+                    , description: description
+                    , defaultTaskList : { name: name }
+
+                    /* setting default values means when creating 
+                     * new activity tasks, these values do *NOT* need
+                     * to be specified */
+                    , defaultTaskStartToCloseTimeout: "60"
+                    , defaultTaskScheduleToStartTimeout: "10"
+                    , defaultTaskScheduleToCloseTimeout: "30"
+                    , defaultTaskHeartbeatTimeout: "NONE"
+                }, function(err, data){
+                    if (err) return cb(err); 
+
+                    d.status("Created new activity type: %s", name);
+                    cb(null, domain);
+                });
+            } else if (err) {
+                cb(err);
+            } else {
+                d.status("Found activityType: %s", name);
+                cb(null, domain);
+            }
+        });
+    }
+}
